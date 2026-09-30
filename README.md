@@ -1,8 +1,8 @@
 # Hammy Home Mod Menu
+This mod menu allows for advanced editing of cages in Hammy Home, or just to have fun.
+## Controls
 
-## Debug controls
-
-- Press `F8` to toggle the debug panel.
+- Press `F8` to toggle the mod menu.
 - Drag the panel by its title/header.
 - Click an object from the object list.
 - Edit position, rotation, and scale directly.
