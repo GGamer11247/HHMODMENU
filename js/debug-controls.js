@@ -5,20 +5,38 @@
 (function () {
   'use strict';
 
+  // Load exactly once. The game expects both debug-controls.js and the
+  // versioned compatibility filename to exist; the second load is a no-op.
+  if (window.__HAMMY_DEBUG_CONTROLS_LOADED__) return;
+  window.__HAMMY_DEBUG_CONTROLS_LOADED__ = true;
+
   var root = window.z0;
+  function getRoot() { return window.z0 || root || null; }
   var MAX_DEBUG_OBJECTS = 1000000;
   var DEFAULT_BUFFER_CAPACITY = 256;
-  var state = { selected: null, open: true };
+  var state = {
+    selected: null,
+    open: true,
+    mods: {
+      pouchCapacity: 6,
+      gravityStrength: 39.2266,
+      gravityX: 0,
+      gravityY: -1,
+      gravityZ: 0,
+      gravityInitialized: false
+    }
+  };
 
   function z(name) {
-    if (!root) return null;
-    if (root[name]) return root[name];
-    if (root.z2 && root.z2[name]) return root.z2[name];
+    var r = getRoot();
+    if (!r) return null;
+    if (r[name]) return r[name];
+    if (r.z2 && r.z2[name]) return r.z2[name];
     return null;
   }
 
   function getPool() {
-    return root && root.z2 && root.z2.Helpers ? root.z2.Helpers.ObjectPool : null;
+    var r = getRoot(); return r && r.z2 && r.z2.Helpers ? r.z2.Helpers.ObjectPool : null;
   }
 
   function forEachCtor(obj, visitor, seen, depth) {
@@ -48,6 +66,8 @@
     var acc = z('z1092');
     var drag = z('z1061');
     var manager = z('z1063');
+    var foodConfig = z('FoodConfig');
+    if (foodConfig && Number(foodConfig.maxObjects) < 250) foodConfig.maxObjects = 250;
     // Object counts / pools.
     var pool = getPool();
     if (pool) {
@@ -69,7 +89,7 @@
     if (z('z1062')) z('z1062').objectCount = MAX_DEBUG_OBJECTS;
     if (acc && acc.prototype) acc.prototype.getObjectCount = function () { return MAX_DEBUG_OBJECTS; };
     if (acc && acc.prototype) {
-      forEachCtor(root, function (ctor) {
+      forEachCtor(getRoot(), function (ctor) {
         try {
           if (ctor !== acc && ctor.prototype && acc.prototype.isPrototypeOf(ctor.prototype)) {
             ctor.objectCount = MAX_DEBUG_OBJECTS;
@@ -99,23 +119,6 @@
       };
     }
     if (manager) manager.prototype._isValidDrop = function () { return true; };
-
-    // Lift camera translation and zoom limits.
-    if (z('z3') && z('z3').prototype) {
-      // Camera bounds are instance properties, cleared after the app exists.
-      // We also remove the border-based movement gate here.
-      z('z3').prototype.checkDragCamera = (function (original) {
-        return function () {
-          var gh = this;
-          try {
-            gh.moveCameraBorder = 0;
-            gh.camBoundsMin = null;
-            gh.camBoundsMax = null;
-          } catch (_) {}
-          return original ? original.apply(this, arguments) : undefined;
-        };
-      })(z('z3').prototype.checkDragCamera);
-    }
 
     // Disable the application-level "is placed / can translate / can rotate"
     // restrictions for local experiments.
@@ -164,7 +167,7 @@
     '#hamDebug.hdDragging .hdHead{cursor:grabbing}',
     '#hamDebug .hdTitle{font-weight:700;font-size:14px;flex:1}',
     '#hamDebug button,#hamDebug select,#hamDebug input{font:inherit}',
-    '#hamDebug button{background:#2b2f38;color:#fff;border:1px solid #525866;border-radius:5px;padding:4px 7px;cursor:pointer}',
+    '#hamDebug button{background:#2b2f38;color:#fff;border:1px solid #525866;border-radius:5px;padding:6px 9px;cursor:pointer;pointer-events:auto}',
     '#hamDebug button:hover{background:#3a404b}',
     '#hamDebug input,#hamDebug select{background:#101217;color:#eee;border:1px solid #454b57;border-radius:4px;padding:3px 5px}',
     '#hamDebug .hdBody{padding:8px;max-height:calc(100vh - 80px);overflow:auto}',
@@ -259,6 +262,152 @@
   function isHamster(o) { return nameOf(o).toLowerCase().indexOf('1062') >= 0 || nameOf(o).toLowerCase() === 'z1062'; }
   function isBedding(o) { return nameOf(o) === 'Bedding' || (o && o.floorY != null && o.pieces && o.resetHeights); }
 
+
+  // ---- Hamster discovery / global gravity -------------------------------
+  function getHamsters(app) {
+    var H = z('z1062'), list = [];
+    if (H && Array.isArray(H.activeObjects)) {
+      H.activeObjects.forEach(function (h) {
+        if (h && list.indexOf(h) === -1) list.push(h);
+      });
+    }
+    if (!list.length && app) {
+      getObjects(app).forEach(function (o) { if (isHamster(o)) list.push(o); });
+    }
+    return list;
+  }
+
+  function getControlledHamster(app) {
+    var hs = getHamsters(app);
+    return hs[0] || null;
+  }
+
+  function readGravityFromWorld(app) {
+    var world = app && app.world;
+    if (!world || !world.gravity) return false;
+    var x=Number(world.gravity.x)||0, y=Number(world.gravity.y)||0, zc=Number(world.gravity.z)||0;
+    var mag=Math.sqrt(x*x+y*y+zc*zc);
+    if (!isFinite(mag) || mag < 1e-8) {
+      state.mods.gravityStrength=0;
+      state.mods.gravityX=0; state.mods.gravityY=-1; state.mods.gravityZ=0;
+    } else {
+      state.mods.gravityStrength=mag;
+      state.mods.gravityX=x/mag; state.mods.gravityY=y/mag; state.mods.gravityZ=zc/mag;
+    }
+    state.mods.gravityInitialized=true;
+    return true;
+  }
+
+  function applyGravityToWorld(app) {
+    var world = app && app.world;
+    if (!world || !world.gravity) return false;
+    var x=Number(state.mods.gravityX), y=Number(state.mods.gravityY), zc=Number(state.mods.gravityZ);
+    if (!isFinite(x)) x=0; if (!isFinite(y)) y=-1; if (!isFinite(zc)) zc=0;
+    var len=Math.sqrt(x*x+y*y+zc*zc);
+    if (!isFinite(len) || len < 1e-8) { x=0; y=-1; zc=0; len=1; state.mods.gravityX=0;state.mods.gravityY=-1;state.mods.gravityZ=0; }
+    var strength=Math.max(0,Math.min(500,Number(state.mods.gravityStrength)||0));
+    world.gravity.x=x/len*strength;
+    world.gravity.y=y/len*strength;
+    world.gravity.z=zc/len*strength;
+    state.mods.gravityInitialized=true;
+    return true;
+  }
+
+  function gravityText(app) {
+    var world=app&&app.world;
+    if (!world||!world.gravity) return 'Physics world not initialized yet';
+    var x=Number(world.gravity.x)||0,y=Number(world.gravity.y)||0,z=Number(world.gravity.z)||0;
+    var mag=Math.sqrt(x*x+y*y+z*z);
+    return 'Live gravity: ('+fmt(x)+', '+fmt(y)+', '+fmt(z)+') | strength '+fmt(mag);
+  }
+
+  function readGravityFields(mods, strength, gx, gy, gz) {
+    var sval=String(strength.value).trim();
+    var xv=String(gx.value).trim(), yv=String(gy.value).trim(), zv=String(gz.value).trim();
+    if (sval !== '') {
+      var sn=Number(sval);
+      if (isFinite(sn)) mods.gravityStrength=Math.max(0,Math.min(500,sn));
+    }
+    if (xv !== '') { var xn=Number(xv); if (isFinite(xn)) mods.gravityX=Math.max(-1,Math.min(1,xn)); }
+    if (yv !== '') { var yn=Number(yv); if (isFinite(yn)) mods.gravityY=Math.max(-1,Math.min(1,yn)); }
+    if (zv !== '') { var zn=Number(zv); if (isFinite(zn)) mods.gravityZ=Math.max(-1,Math.min(1,zn)); }
+  }
+
+  function setPouchCapacity(h, value) {
+    var cap = Math.max(1, Math.min(999, Math.floor(Number(value) || 1)));
+    state.mods.pouchCapacity = cap;
+    if (!h) {
+      getHamsters(getRoot() && getRoot().app).forEach(function (ham) { ham._maxPouchedFood = cap; });
+      return;
+    }
+    h._maxPouchedFood = cap;
+  }
+
+  function applyPouchCapacityToAll(app) {
+    var cap = Math.max(1, Math.min(999, Math.floor(Number(state.mods.pouchCapacity) || 6)));
+    state.mods.pouchCapacity = cap;
+    getHamsters(app).forEach(function (h) { h._maxPouchedFood = cap; });
+  }
+
+  function getStoredFoodCount(h) {
+    return h && Array.isArray(h.pouchedFood) ? h.pouchedFood.length : 0;
+  }
+
+  function updatePouchVisualState(h) {
+    if (!h) return;
+    var cap = Math.max(1, Number(h._maxPouchedFood) || 6);
+    h._pouchFilledFracLeft = Math.min(1, (Number(h._numPouchedFoodLeft) || 0) / cap);
+    h._pouchFilledFracRight = Math.min(1, (Number(h._numPouchedFoodRight) || 0) / cap);
+  }
+
+  function setStoredFoodCount(h, target, app) {
+    if (!h) return {count:0, added:0, removed:0};
+    var desired = Math.max(0, Math.min(250, Math.floor(Number(target) || 0)));
+    var fm = app && app.foodManager;
+    var current = getStoredFoodCount(h), added = 0, removed = 0;
+    if (!fm || typeof fm.getRandomInactive !== 'function') return {count:current, added:0, removed:0};
+
+    while (current > desired && h.pouchedFood.length) {
+      var out = typeof h.removeFoodFromPouch === 'function' ? h.removeFoodFromPouch() : h.pouchedFood.pop();
+      if (!out) break;
+      out.owner = null; out.unpouching = false; out.pouchSide = 0;
+      safeCall(out.removeFromAccessories, out);
+      safeCall(out.removeFromScene, out);
+      safeCall(out.removeFromTracker, out);
+      safeCall(out.disablePhysics, out);
+      safeCall(fm.recycle, fm, out);
+      current--; removed++;
+    }
+
+    while (current < desired) {
+      var food = safeCall(fm.getRandomInactive, fm);
+      if (!food) break;
+      // Match the game's normal food-creation path so recycled food has all
+      // of its runtime state initialized before it enters a pouch.
+      safeCall(food.init, food, {skipAddToScene:true, rz:Math.PI*Math.random()});
+      safeCall(food.removeFromScene, food);
+      safeCall(food.removeFromAccessories, food);
+      safeCall(food.removeFromTracker, food);
+      food.owner = h;
+      food.unpouching = false;
+      food.pouchSide = (Number(h._numPouchedFoodLeft) || 0) <= (Number(h._numPouchedFoodRight) || 0) ? -1 : 1;
+      if (typeof h.addFoodToPouch === 'function') h.addFoodToPouch(food);
+      else h.pouchedFood.push(food);
+      current++; added++;
+    }
+    if (current > Number(h._maxPouchedFood) || !h._maxPouchedFood) h._maxPouchedFood = Math.max(6, current);
+    updatePouchVisualState(h);
+    return {count:getStoredFoodCount(h), added:added, removed:removed};
+  }
+
+  function pouchText(h) {
+    if (!h) return 'No hamster found';
+    var count = getStoredFoodCount(h);
+    var cap = Number(h._maxPouchedFood) || 0;
+    return count + ' / ' + cap + ' food bits currently stored';
+  }
+
+
   function currentScale(o) {
     if (isHamster(o) && o.mesh && o.mesh.scaling) return o.mesh.scaling;
     return o && o.scaling ? o.scaling : null;
@@ -285,12 +434,12 @@
     var style = document.createElement('style'); style.textContent = css; document.head.appendChild(style);
     var panel = el('div',{id:'hamDebug'});
     var head = el('div',{className:'hdHead'});
-    head.appendChild(el('div',{className:'hdTitle',text:'Hammy Debug Controls'}));
+    head.appendChild(el('div',{className:'hdTitle',text:'HamsterEdit — v1.0'}));
     var status = el('span',{className:'hdBadge',id:'hdStatus',text:'waiting'}); head.appendChild(status);
     var collapse = el('button',{title:'Toggle panel',text:'×'}); head.appendChild(collapse);
     panel.appendChild(head);
     var body = el('div',{className:'hdBody',id:'hdBody'}); panel.appendChild(body);
-    document.body.appendChild(panel);
+    (document.documentElement || document.body).appendChild(panel);
     collapse.addEventListener('click',function(){ body.classList.toggle('hdHidden'); });
 
     // Make the debug panel actually draggable.  The app uses pointer events on
@@ -340,14 +489,152 @@
     return panel;
   }
 
+
+  function ensurePanelMounted() {
+    var panel = document.getElementById('hamDebug');
+    if (panel && panel.parentNode !== document.documentElement && panel.parentNode !== document.body) {
+      (document.documentElement || document.body).appendChild(panel);
+    }
+    return panel;
+  }
+
+
+  function renderGlobalControls(app, body) {
+    var mods=state.mods;
+    var activeHam=getControlledHamster(app);
+    if (app && app.world && app.world.gravity && !mods.gravityInitialized) readGravityFromWorld(app);
+
+    body.appendChild(el('div',{className:'hdMini hdOk',text:'HamsterEdit v1.0 — global gravity + food pouch'}));
+    body.appendChild(el('div',{className:'hdSection',text:'Global Gravity'}));
+
+    var strength=el('input',{type:'number',step:'0.01',min:'0',max:'500',value:fmt(mods.gravityStrength),id:'hdGravityStrength',name:'gravityStrength'});
+    var gx=el('input',{type:'number',step:'0.01',min:'-1',max:'1',value:fmt(mods.gravityX),id:'hdGravityX',name:'gravityDirectionX'});
+    var gy=el('input',{type:'number',step:'0.01',min:'-1',max:'1',value:fmt(mods.gravityY),id:'hdGravityY',name:'gravityDirectionY'});
+    var gz=el('input',{type:'number',step:'0.01',min:'-1',max:'1',value:fmt(mods.gravityZ),id:'hdGravityZ',name:'gravityDirectionZ'});
+    body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:'Strength',for:'hdGravityStrength'}),strength]));
+    body.appendChild(el('div',{className:'hdMini',text:'Direction X / Y / Z. The vector is normalized automatically. Gravity updates as you edit; Apply gravity also commits it explicitly.'}));
+    body.appendChild(el('div',{className:'hdTriple'},[
+      el('label',{text:'X',for:'hdGravityX'}),gx,
+      el('label',{text:'Y',for:'hdGravityY'}),gy,
+      el('label',{text:'Z',for:'hdGravityZ'}),gz
+    ]));
+
+    var apply=el('button',{text:'Apply gravity',id:'hdApplyGravity'});
+    var reset=el('button',{text:'Reset default gravity',id:'hdResetGravity'});
+    body.appendChild(el('div',{className:'hdBtns'},[apply,reset]));
+    body.appendChild(el('div',{className:'hdMini',text:'Direction presets'}));
+    var presets=[
+      ['Normal',39.2266,0,-1,0],
+      ['Moon',1.62,0,-1,0],
+      ['Jupiter',24.79,0,-1,0],
+      ['Sun',274,0,-1,0],
+      ['Pluto',0.62,0,-1,0],
+      ['Zero-G',0,0,-1,0]
+    ];
+    body.appendChild(el('div',{className:'hdMini',text:'Gravity Presets'}));
+    presets.forEach(function(p,i){
+      var b=el('button',{text:p[0],id:'hdGravityPreset'+i});
+      b.type='button';
+      b.onclick=function(){strength.value=fmt(p[1]);gx.value=fmt(p[2]);gy.value=fmt(p[3]);gz.value=fmt(p[4]);apply.click();};
+      body.appendChild(b);
+      if(i===2) body.appendChild(el('span',{text:''}));
+    });
+    // Move preset buttons into the normal button row for consistent layout.
+    var presetNodes=[];
+    for (var pi=0;pi<presets.length;pi++){var node=document.getElementById('hdGravityPreset'+pi);if(node)presetNodes.push(node);}
+    var pwrap=el('div',{className:'hdBtns'});
+    presetNodes.forEach(function(n){if(n.parentNode) n.parentNode.removeChild(n);pwrap.appendChild(n);});
+    body.appendChild(pwrap);
+    body.appendChild(el('div',{className:'hdMini',text:'Direction Presets'}));
+    var dirPresets=[['Down',0,-1,0],['Up',0,1,0],['Left',-1,0,0],['Right',1,0,0],['Forward',0,0,1],['Back',0,0,-1]];
+    var dwrap=el('div',{className:'hdBtns'});
+    dirPresets.forEach(function(p){
+      var b=el('button',{text:p[0]});
+      b.type='button';
+      b.onclick=function(){gx.value=fmt(p[1]);gy.value=fmt(p[2]);gz.value=fmt(p[3]);commitGravityFields();};
+      dwrap.appendChild(b);
+    });
+    body.appendChild(dwrap);
+    body.appendChild(el('div',{className:'hdMini hdOk',id:'hdGravityStatus',text:gravityText(app)}));
+
+    apply.type='button'; reset.type='button';
+    function commitGravityFields(){
+      readGravityFields(mods,strength,gx,gy,gz);
+      applyGravityToWorld(app);
+      var s=document.getElementById('hdGravityStatus');if(s)s.textContent=gravityText(app);
+    }
+    [strength,gx,gy,gz].forEach(function(field){
+      field.addEventListener('input',function(){
+        readGravityFields(mods,strength,gx,gy,gz);
+        applyGravityToWorld(app);
+        var s=document.getElementById('hdGravityStatus');if(s)s.textContent=gravityText(app);
+      });
+      field.addEventListener('change',commitGravityFields);
+    });
+    apply.onclick=commitGravityFields;
+    reset.onclick=function(){
+      mods.gravityStrength=39.2266;mods.gravityX=0;mods.gravityY=-1;mods.gravityZ=0;
+      strength.value=fmt(mods.gravityStrength);gx.value='0';gy.value='-1';gz.value='0';
+      applyGravityToWorld(app);
+      var s=document.getElementById('hdGravityStatus');if(s)s.textContent=gravityText(app);
+    };
+
+    body.appendChild(el('div',{className:'hdSection',text:'Hamster food storage'}));
+    var stored=el('input',{type:'number',step:'1',min:'0',max:'250',value:String(activeHam?getStoredFoodCount(activeHam):0),id:'hdPouchStored',name:'storedFoodBits'});
+    var cap=el('input',{type:'number',step:'1',min:'1',max:'250',value:String(activeHam?Math.max(Number(activeHam._maxPouchedFood)||6,getStoredFoodCount(activeHam)):6),id:'hdPouchCap',name:'foodBitsCapacity'});
+    body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:'Stored food bits',for:'hdPouchStored'}),stored]));
+    body.appendChild(el('div',{className:'hdBtns'},[el('button',{text:'Apply stored amount',id:'hdApplyPouch'}),el('button',{text:'Empty pouch',id:'hdEmptyPouch'})]));
+    body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:'Food bits capacity',for:'hdPouchCap'}),cap]));
+    body.appendChild(el('div',{className:'hdMini hdOk',id:'hdPouchStatus',text:pouchText(activeHam)}));
+
+    cap.onchange=function(){
+      var c=Math.max(1,Math.min(250,Math.floor(Number(this.value)||6)));
+      state.mods.pouchCapacity=c;
+      getHamsters(app).forEach(function(h){h._maxPouchedFood=Math.max(c,getStoredFoodCount(h));updatePouchVisualState(h);});
+      var s=document.getElementById('hdPouchStatus');if(s)s.textContent=pouchText(getControlledHamster(app));
+    };
+    body.querySelector('#hdApplyPouch').onclick=function(){
+      var h=getControlledHamster(app);if(!h){renderPanel(app);return;}
+      var result=setStoredFoodCount(h,Number(stored.value)||0,app);
+      stored.value=String(result.count);
+      if(result.count>Number(h._maxPouchedFood)||!h._maxPouchedFood)h._maxPouchedFood=Math.max(6,result.count);
+      cap.value=String(Math.max(Number(h._maxPouchedFood)||6,result.count));
+      var s=document.getElementById('hdPouchStatus');if(s)s.textContent=pouchText(h);
+      renderPanel(app);
+    };
+    body.querySelector('#hdEmptyPouch').onclick=function(){var h=getControlledHamster(app);if(h)setStoredFoodCount(h,0,app);renderPanel(app);};
+
+    fixPanelFormAccessibility();
+  }
+
+  function fixPanelFormAccessibility() {
+    var panel = document.getElementById('hamDebug');
+    if (!panel) return;
+    var seq = 0;
+    panel.querySelectorAll('input,select,textarea').forEach(function(field){
+      if (!field.id) field.id = 'hamDebugField' + (++seq);
+      if (!field.name) field.name = field.id;
+    });
+    panel.querySelectorAll('.hdRow1,.hdRow').forEach(function(row){
+      var label = row.querySelector('label');
+      var field = row.querySelector('input,select,textarea');
+      if (!label || !field) return;
+      if (!field.id) field.id = 'hamDebugField' + (++seq);
+      if (!field.name) field.name = field.id;
+      label.setAttribute('for', field.id);
+    });
+  }
+
   function renderPanel(app) {
     var panel = buildPanel(), body = document.getElementById('hdBody'), status = document.getElementById('hdStatus');
     if (!body || !app) return;
     status.textContent = state.selected ? 'selected' : 'ready';
     body.innerHTML = '';
 
+    applyPouchCapacityToAll(app);
+    renderGlobalControls(app, body);
     var objs = getObjects(app);
-    var select = el('select',{id:'hdSelect'});
+    var select = el('select',{id:'hdSelect',name:'selectedObject'});
     select.appendChild(el('option',{value:'',text:'— Select an item / hamster —'}));    objs.forEach(function(o,i){
       var label = objectLabel(o, i, objs);
       var op=el('option',{value:String(i),text:label});
@@ -362,16 +649,11 @@
     if (!state.selected) {
       body.appendChild(el('div',{className:'hdSection',text:'Global'}));
       body.appendChild(el('div',{className:'hdBtns'},[
-        el('button',{text:'Unlock camera',id:'hdUnlockCam'}),
-        el('button',{text:'Center camera',id:'hdCenterCam'}),
         el('button',{text:'Refresh list',id:'hdRefresh'})
       ]));
-      body.appendChild(el('div',{className:'hdMini hdOk',text:'Restrictions bypassed: object counts, placement validation, grid snapping, camera bounds and zoom limits.'}));
-      body.querySelector('#hdUnlockCam').onclick=function(){patchInstanceState(app);};
-      body.querySelector('#hdCenterCam').onclick=function(){
-        var c=app.scene && app.scene.activeCamera; if(c){c.position.x=0;c.position.y=0;c.position.z=-30;}
-      };
+      body.appendChild(el('div',{className:'hdMini hdOk',text:'Camera modes and camera hotkeys have been removed. Gravity controls stay on screen without being re-rendered while you edit.'}));
       body.querySelector('#hdRefresh').onclick=function(){renderPanel(app);};
+      fixPanelFormAccessibility();
       return;
     }
 
@@ -392,8 +674,8 @@
     var f={pos:{x:pos.x,y:pos.y,z:pos.z},rot:{x:deg(rotObj.x),y:deg(rotObj.y),z:deg(rotObj.z)},scale:{x:sc.x,y:sc.y,z:sc.z}};
     var inputs={};
     function numRow(title, key, value){
-      var input=el('input',{type:'number',step:'0.01',value:fmt(value)}); inputs[key]=input;
-      return el('div',{className:'hdRow'},[el('label',{text:title}),input,el('span',{className:'hdMini',text:key.toUpperCase()}),el('span',{className:'hdMini',text:''})]);
+      var input=el('input',{type:'number',step:'0.01',value:fmt(value),id:'hdField_'+key,name:'field_'+key}); inputs[key]=input;
+      return el('div',{className:'hdRow'},[el('label',{text:title,for:'hdField_'+key}),input,el('span',{className:'hdMini',text:key.toUpperCase()}),el('span',{className:'hdMini',text:''})]);
     }
     body.appendChild(el('div',{className:'hdSection',text:'Transform'}));
     body.appendChild(el('div',{className:'hdMini',text:'Position'}));
@@ -419,9 +701,10 @@
       body.appendChild(el('div',{className:'hdSection',text:'Hamster size'}));
       var sizeVal = Number(o.size || 0);
       var sizeInput = el('input',{type:'number',step:'0.01',value:fmt(sizeVal),id:'hdHSize'});
-      body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:'Physics size'}),sizeInput]));
+      body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:'Physics size',for:'hdHSize'}),sizeInput]));
       sizeInput.addEventListener('change',function(){o.size=Number(this.value)||o.size; if(o.physics&&o.physics.setPosition&&o.position)safeCall(o.physics.setPosition,o.physics,o.position.x,o.position.y,o.position.z);});
       body.appendChild(el('div',{className:'hdMini hdWarn',text:'Physics size affects behavior placement; the visible mesh scale above is independent and can be edited freely.'}));
+      body.appendChild(el('div',{className:'hdMini hdOk',text:pouchText(o)}));
     }
 
     var colors = typeof o.getColors === 'function' ? safeCall(o.getColors,o) : o._colors;
@@ -429,9 +712,9 @@
       body.appendChild(el('div',{className:'hdSection',text:isHamster(o)?'Fur / color / pattern':'Color'}));
       Object.keys(colors).forEach(function(key){
         var c=normalizeColorValue(colors[key]);
-        var input=el('input',{type:'color',value:toHex(c)});
+        var input=el('input',{type:'color',value:toHex(c),id:'hdColor_'+String(key).replace(/[^A-Za-z0-9_]/g,'_')});
         input.addEventListener('input',function(){setColor(o,key,this.value);});
-        body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:key}),input]));
+        body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:key,for:input.id||''}),input]));
       });
     }
 
@@ -441,13 +724,13 @@
       Object.keys(options).forEach(function(key){
         var opt=options[key]||{};
         if(opt.inputType==='text'){
-          var t=el('input',{type:'text',value:opt.value==null?'':opt.value});
+          var t=el('input',{type:'text',value:opt.value==null?'':opt.value,id:'hdOpt_'+String(key).replace(/[^A-Za-z0-9_]/g,'_')});
           t.addEventListener('change',function(){if(o.setOption)safeCall(o.setOption,o,key,this.value);});
-          body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:opt.labelName||key}),t]));
+          body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:opt.labelName||key,for:t.id||''}),t]));
         } else {
-          var cb=el('input',{type:'checkbox',checked:String(opt.value)==='1'});
+          var cb=el('input',{type:'checkbox',checked:String(opt.value)==='1',id:'hdOpt_'+String(key).replace(/[^A-Za-z0-9_]/g,'_')});
           cb.addEventListener('change',function(){if(o.setOption)safeCall(o.setOption,o,key,this.checked?'1':'0');});
-          body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:opt.labelName||key}),cb]));
+          body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:opt.labelName||key,for:cb.id||''}),cb]));
         }
       });
     }
@@ -458,7 +741,7 @@
         if (o[key] == null) return;
         var input=el('input',{type:'number',step:'0.01',value:fmt(o[key])});
         input.addEventListener('change',function(){o[key]=Number(this.value);if(o.forceUpdateAll)safeCall(o.forceUpdateAll,o);});
-        body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:key}),input]));
+        body.appendChild(el('div',{className:'hdRow1'},[el('label',{text:key,for:input.id||''}),input]));
       });
       body.appendChild(el('div',{className:'hdBtns'},[
         el('button',{text:'Reset bedding heights',id:'hdBedReset'}),
@@ -473,6 +756,7 @@
     try { props = typeof o.getProps==='function' ? o.getProps() : {}; } catch(_){ props={}; }
     var ta=el('textarea',{readonly:'readonly'}); ta.value=JSON.stringify(props,null,2);
     body.appendChild(ta);
+    fixPanelFormAccessibility();
   }
 
   function installScenePicking(app) {
@@ -499,48 +783,51 @@
     app.__hamDebugPickInstalled=true;
   }
 
-  function setupKeyboard(app){
-    if(window.__hamDebugKeys) return; window.__hamDebugKeys=true;
-    document.addEventListener('keydown',function(ev){
-      var panel=document.getElementById('hamDebug');
-      if(ev.key==='F8'){ev.preventDefault();if(panel)panel.style.display=panel.style.display==='none'?'block':'none';return;}
-      if(!state.selected) return;
-      var tag=(document.activeElement&&document.activeElement.tagName)||'';
-      if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
-      var o=state.selected,p=o.position||{x:0,y:0,z:0},step=0.2;
-      if(ev.shiftKey) step=1;
-      if(ev.key==='ArrowLeft') {safeCall(o.setPosition,o,p.x-step,p.y,p.z);ev.preventDefault();}
-      else if(ev.key==='ArrowRight'){safeCall(o.setPosition,o,p.x+step,p.y,p.z);ev.preventDefault();}
-      else if(ev.key==='ArrowUp'){safeCall(o.setPosition,o,p.x,p.y,p.z-step);ev.preventDefault();}
-      else if(ev.key==='ArrowDown'){safeCall(o.setPosition,o,p.x,p.y,p.z+step);ev.preventDefault();}
-      else if(ev.key==='PageUp'){safeCall(o.setPosition,o,p.x,p.y+step,p.z);ev.preventDefault();}
-      else if(ev.key==='PageDown'){safeCall(o.setPosition,o,p.x,p.y-step,p.z);ev.preventDefault();}
-      else if(ev.key==='['||ev.key===']'){
-        var sc=currentScale(o)||{x:1,y:1,z:1}, mul=ev.key==='['?.9:1.1;
-        if(o.setScale&&!isHamster(o))safeCall(o.setScale,o,sc.x*mul,sc.y*mul,sc.z*mul);
-        if(currentScale(o)){currentScale(o).x*=mul;currentScale(o).y*=mul;currentScale(o).z*=mul;} ev.preventDefault();
-      }
-      else if(ev.key.toLowerCase()==='r'){
-        var r=o.rotation||{x:0,y:0,z:0};safeCall(o.setRotation,o,r.x,r.y+5*Math.PI/180,r.z);ev.preventDefault();
-      }
-    });
-  }
+  window.HammyDebug = window.HammyDebug || {};
+  window.HammyDebug.getState=function(){return state.mods;};
+  window.HammyDebug.getApp=function(){var r=getRoot();return r&&r.app;};
+  window.HammyDebug.applyGravity=function(strength,x,y,z){
+    state.mods.gravityStrength=Math.max(0,Math.min(500,Number(strength)||0));
+    state.mods.gravityX=Number(x)||0;state.mods.gravityY=Number(y)||0;state.mods.gravityZ=Number(z)||0;
+    var r=getRoot(),app=r&&r.app;return applyGravityToWorld(app);
+  };
+
 
   function boot() {
-    patchRestrictions();
-    var panel=buildPanel();
-    panel.style.display='none';
+    var panel = buildPanel();
+    panel.style.display = 'block';
     panel.addEventListener('pointerdown',function(e){e.stopPropagation();});
+    try {
+      var observer = new MutationObserver(function(){ ensurePanelMounted(); });
+      observer.observe(document.documentElement,{childList:true,subtree:false});
+    } catch (_) {}
+    var initialized = false;
+    function showError(e){
+      console.warn('[Hammy Debug] startup/update error',e);
+      var status=document.getElementById('hdStatus');
+      if(status){status.textContent='error';status.title=e&&e.message?e.message:String(e);}
+    }
     var timer=setInterval(function(){
-      var app=root && root.app;
+      var r=getRoot();
+      var app=r&&r.app;
+      ensurePanelMounted();
       if(!app) return;
-      patchInstanceState(app);
-      var main = document.getElementById('main');
-      if (main && main.style.visibility === 'visible') panel.style.display = 'block';
-      installScenePicking(app);
-      setupKeyboard(app);
-      if(!state.__rendered || state.selected===null){renderPanel(app);state.__rendered=true;}
-      if(main && main.style.visibility==='visible') { clearInterval(timer); }
+      try {
+        if(!initialized){
+          patchRestrictions();
+          initialized=true;
+        }
+        patchInstanceState(app);
+        installScenePicking(app);
+        if (!state.mods.gravityInitialized) readGravityFromWorld(app);
+        applyGravityToWorld(app);
+        var main=document.getElementById('main');
+        if(main&&main.style.visibility==='visible')panel.style.display='block';
+        if(!state.__rendered){
+          renderPanel(app);
+          state.__rendered=true;
+        }
+      } catch(e){ showError(e); }
     },250);
   }
 

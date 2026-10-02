@@ -1,12 +1,13 @@
-# Hammy Home Mod Menu
-This mod menu allows for advanced editing of cages in Hammy Home, or just to have fun.
-## Controls
+# HamsterEdit v1.0
 
-- Press `F8` to toggle the mod menu.
-- Drag the panel by its title/header.
-- Click an object from the object list.
-- Edit position, rotation, and scale directly.
-- Hamsters expose visual scale, physics size, colors, and available pattern/options.
-- Bedding exposes available height/padding controls.
-- The local debug patch removes the original object/placement/camera-translation limits.
-- Camera zoom remains intentionally bounded to a wider, stable range so Babylon's wheel zoom math does not become explosive.
+Hammy Home local mod with a working food-pouch editor and global gravity controls.
+
+Gravity presets included:
+- Normal (Hammy Home's original gravity)
+- Moon (1.62)
+- Jupiter (24.79)
+- Sun (274)
+- Pluto (0.62)
+- Zero-G (0)
+
+The strength and X/Y/Z direction fields remain directly editable. Camera and hamster-control modes are removed.

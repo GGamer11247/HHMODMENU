@@ -146,15 +146,21 @@
     <script src="js/babylon.js"></script>
     <script src="js/libs.js"></script>
     <script src="js/ham.min.js"></script>
-    <script src="js/debug-controls.js"></script>
+    <script src="js/debug-controls.js?v=19"></script>
+    <script src="js/debug-controls-v9.js?v=19"></script>
 	
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js');
-            });
-        }
-    </script>
+
         
+    <div id="hamModLoadStatus" style="position:fixed;left:10px;top:10px;z-index:2147483646;background:rgba(18,18,22,.96);color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:5px 8px;font:12px Arial,sans-serif;pointer-events:none">HamsterEdit v1.0 loading…</div>
+    <script>
+      (function(){
+        var tries=0;
+        var t=setInterval(function(){
+          var status=document.getElementById('hamModLoadStatus');
+          if(document.getElementById('hamDebug')) { if(status) status.remove(); clearInterval(t); }
+          else if(++tries>120) { if(status) status.textContent='HamsterEdit v1.0: debug menu failed to load'; clearInterval(t); }
+        },250);
+      })();
+    </script>
 </body>
 </html>
